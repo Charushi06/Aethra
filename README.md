@@ -1,129 +1,42 @@
-# RunAnywhere Web Starter App
+# Aethra: Local AI Interior Design Advisor
 
-A minimal React + TypeScript starter app demonstrating **on-device AI in the browser** using the [`@runanywhere/web`](https://www.npmjs.com/package/@runanywhere/web) SDK. All inference runs locally via WebAssembly — no server, no API key, 100% private.
+Aethra is a premium web application that brings **on-device AI** to interior design. Using the [`@runanywhere/web`](https://www.npmjs.com/package/@runanywhere/web) SDK, Aethra analyzes your space via camera or photo uploads and provides professional design recommendations—all running locally in your browser.
 
-## Features
+## Key Features
 
-| Tab | What it does |
-|-----|-------------|
-| **Chat** | Stream text from an on-device LLM (LFM2 350M) |
-| **Vision** | Point your camera and describe what the VLM sees (LFM2-VL 450M) |
-| **Voice** | Speak naturally — VAD detects speech, STT transcribes, LLM responds, TTS speaks back |
+- **🏠 AI Design Advisor (VLM):** Analyze your room's architectural style and furniture in real-time. Choose from aesthetics like *Minimalist*, *Bohemian*, or *Industrial* to get tailored improvement tips.
+- **💬 Local Design Consultant (LLM):** Chat with a specialized AI interior designer to plan your space, choose color palettes, and solve layout challenges.
+- **🎙️ Voice Interaction:** Talk naturally to Aethra. Local STT, LLM, and TTS pipelines enable a hands-free design experience.
+- **🔒 100% Private:** Zero server uploads. Your home photos and conversations stay in your browser.
 
-## Quick Start
+## Powered By RunAnywhere
 
-```bash
-npm install
-npm run dev
-```
+- **Vision:** LFM2-VL 450M (GGUF)
+- **Language:** LFM2 350M (GGUF)
+- **Voice Pipeline:** Whisper (STT), Piper (TTS), Silero (VAD) via ONNX Runtime.
 
-Open [http://localhost:5173](http://localhost:5173). Models are downloaded on first use and cached in the browser's Origin Private File System (OPFS).
+## Getting Started
 
-## How It Works
+1. **Install Dependencies:**
+   ```bash
+   npm install
+   ```
 
-```
-@runanywhere/web (npm package)
-  ├── WASM engine (llama.cpp, whisper.cpp, sherpa-onnx)
-  ├── Model management (download, OPFS cache, load/unload)
-  └── TypeScript API (TextGeneration, STT, TTS, VAD, VLM, VoicePipeline)
-```
+2. **Launch Development Server:**
+   ```bash
+   npm run dev
+   ```
 
-The app imports everything from `@runanywhere/web`:
+3. **Open:** [http://localhost:5173](http://localhost:5173)
 
-```typescript
-import { RunAnywhere, SDKEnvironment } from '@runanywhere/web';
-import { TextGeneration, VLMWorkerBridge } from '@runanywhere/web-llamacpp';
+Models are automatically downloaded on first use and cached locally. Performance is best with **WebGPU** (Chrome/Edge 120+).
 
-await RunAnywhere.initialize({ environment: SDKEnvironment.Development });
+## Tech Stack
 
-// Stream LLM text
-const { stream } = await TextGeneration.generateStream('Hello!', { maxTokens: 200 });
-for await (const token of stream) { console.log(token); }
-
-// VLM: describe an image
-const result = await VLMWorkerBridge.shared.process(rgbPixels, width, height, 'Describe this.');
-```
-
-## Project Structure
-
-```
-src/
-├── main.tsx              # React root
-├── App.tsx               # Tab navigation (Chat | Vision | Voice)
-├── runanywhere.ts        # SDK init + model catalog + VLM worker
-├── workers/
-│   └── vlm-worker.ts     # VLM Web Worker entry (2 lines)
-├── hooks/
-│   └── useModelLoader.ts # Shared model download/load hook
-├── components/
-│   ├── ChatTab.tsx        # LLM streaming chat
-│   ├── VisionTab.tsx      # Camera + VLM inference
-│   ├── VoiceTab.tsx       # Full voice pipeline
-│   └── ModelBanner.tsx    # Download progress UI
-└── styles/
-    └── index.css          # Dark theme CSS
-```
-
-## Adding Your Own Models
-
-Edit the `MODELS` array in `src/runanywhere.ts`:
-
-```typescript
-{
-  id: 'my-custom-model',
-  name: 'My Model',
-  repo: 'username/repo-name',           // HuggingFace repo
-  files: ['model.Q4_K_M.gguf'],         // Files to download
-  framework: LLMFramework.LlamaCpp,
-  modality: ModelCategory.Language,      // or Multimodal, SpeechRecognition, etc.
-  memoryRequirement: 500_000_000,        // Bytes
-}
-```
-
-Any GGUF model compatible with llama.cpp works for LLM/VLM. STT/TTS/VAD use sherpa-onnx models.
-
-## Deployment
-
-### Vercel
-
-```bash
-npm run build
-npx vercel --prod
-```
-
-The included `vercel.json` sets the required Cross-Origin-Isolation headers.
-
-### Netlify
-
-Add a `_headers` file:
-
-```
-/*
-  Cross-Origin-Opener-Policy: same-origin
-  Cross-Origin-Embedder-Policy: credentialless
-```
-
-### Any static host
-
-Serve the `dist/` folder with these HTTP headers on all responses:
-
-```
-Cross-Origin-Opener-Policy: same-origin
-Cross-Origin-Embedder-Policy: credentialless
-```
-
-## Browser Requirements
-
-- Chrome 96+ or Edge 96+ (recommended: 120+)
-- WebAssembly (required)
-- SharedArrayBuffer (requires Cross-Origin Isolation headers)
-- OPFS (for persistent model cache)
-
-## Documentation
-
-- [SDK API Reference](https://docs.runanywhere.ai)
-- [npm package](https://www.npmjs.com/package/@runanywhere/web)
-- [GitHub](https://github.com/RunanywhereAI/runanywhere-sdks)
+- **Framework:** React + TypeScript + Vite
+- **AI Engine:** @runanywhere/web (Wasm/WebGPU)
+- **Styling:** Premium Vanilla CSS Design System
+- **Icons:** Lucide-React
 
 ## License
 

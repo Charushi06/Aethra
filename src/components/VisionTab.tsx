@@ -3,265 +3,176 @@ import { ModelCategory, VideoCapture } from '@runanywhere/web';
 import { VLMWorkerBridge } from '@runanywhere/web-llamacpp';
 import { useModelLoader } from '../hooks/useModelLoader';
 import { ModelBanner } from './ModelBanner';
+import { ImageUpload } from './ImageUpload';
+import { getImagePixels } from '../utils';
+import { getAccelerationMode } from '../runanywhere';
 
-const LIVE_INTERVAL_MS = 2500;
-const LIVE_MAX_TOKENS = 30;
-const SINGLE_MAX_TOKENS = 80;
-const CAPTURE_DIM = 256; // CLIP resizes internally; larger is wasted work
+const SINGLE_MAX_TOKENS = 80;   // Reduced output to save context space
+const CAPTURE_DIM = 224;        // Keep 224 as the model is likely trained on it
 
-interface VisionResult {
-  text: string;
-  totalMs: number;
-}
+const AESTHETIC_STYLES = [
+  'Earthy Minimal', 'Eclectic Boho', 'Soft Modern', 'Vintage Industrial', 'Cottagecore', 'Japandi'
+];
 
 export function VisionTab() {
   const loader = useModelLoader(ModelCategory.Multimodal);
   const [cameraActive, setCameraActive] = useState(false);
   const [processing, setProcessing] = useState(false);
-  const [liveMode, setLiveMode] = useState(false);
-  const [result, setResult] = useState<VisionResult | null>(null);
+  const [procStep, setProcStep] = useState<'encoding' | 'generating' | null>(null);
+  const [result, setResult] = useState<{ text: string; totalMs: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [prompt, setPrompt] = useState('Describe what you see briefly.');
+  
+  const [uploadedImage, setUploadedImage] = useState<{ file: File; previewUrl: string } | null>(null);
+  const [selectedStyle, setSelectedStyle] = useState('Earthy Minimal');
+  const [vibePrompt, setVibePrompt] = useState('A cozy minimal theme with plants.');
 
   const videoMountRef = useRef<HTMLDivElement>(null);
   const captureRef = useRef<VideoCapture | null>(null);
   const processingRef = useRef(false);
-  const liveIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const liveModeRef = useRef(false);
 
-  // Keep refs in sync with state so interval callbacks see latest values
   processingRef.current = processing;
-  liveModeRef.current = liveMode;
 
-  // ------------------------------------------------------------------
-  // Camera
-  // ------------------------------------------------------------------
+  useEffect(() => {
+    if (loader.state === 'idle') {
+      loader.ensure();
+    }
+  }, [loader]);
+
+  useEffect(() => {
+    if (cameraActive && videoMountRef.current && captureRef.current) {
+        const el = captureRef.current.videoElement;
+        el.style.width = '100%';
+        el.style.height = '100%';
+        if (!videoMountRef.current.contains(el)) videoMountRef.current.appendChild(el);
+    }
+  }, [cameraActive]);
+
   const startCamera = useCallback(async () => {
-    if (captureRef.current?.isCapturing) return;
-
+    setUploadedImage(null);
     setError(null);
-
     try {
-      const cam = new VideoCapture({ facingMode: 'environment' });
+      const cam = new VideoCapture({ facingMode: 'user' });
       await cam.start();
       captureRef.current = cam;
-
-      const mount = videoMountRef.current;
-      if (mount) {
-        const el = cam.videoElement;
-        el.style.width = '100%';
-        el.style.borderRadius = '12px';
-        mount.appendChild(el);
-      }
-
       setCameraActive(true);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-
-      if (msg.includes('NotAllowed') || msg.includes('Permission')) {
-        setError(
-          'Camera permission denied. On macOS, check System Settings → Privacy & Security → Camera and ensure your browser is allowed.',
-        );
-      } else if (msg.includes('NotFound') || msg.includes('DevicesNotFound')) {
-        setError('No camera found on this device.');
-      } else if (msg.includes('NotReadable') || msg.includes('TrackStartError')) {
-        setError('Camera is in use by another application.');
-      } else {
-        setError(`Camera error: ${msg}`);
-      }
+      setError('Camera access denied. ' + String(err));
     }
   }, []);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (liveIntervalRef.current) clearInterval(liveIntervalRef.current);
-      const cam = captureRef.current;
-      if (cam) {
-        cam.stop();
-        cam.videoElement.parentNode?.removeChild(cam.videoElement);
-        captureRef.current = null;
-      }
-    };
+  const stopCamera = useCallback(() => {
+    setCameraActive(false);
+    captureRef.current?.stop();
+    captureRef.current = null;
   }, []);
 
-  // ------------------------------------------------------------------
-  // Core: capture + infer
-  // ------------------------------------------------------------------
-  const describeFrame = useCallback(async (maxTokens: number) => {
+  const analyzeDesign = useCallback(async (maxTokens: number) => {
     if (processingRef.current) return;
-
-    const cam = captureRef.current;
-    if (!cam?.isCapturing) return;
-
-    // Ensure model loaded
-    if (loader.state !== 'ready') {
-      const ok = await loader.ensure();
-      if (!ok) return;
+    
+    let pix;
+    if (uploadedImage) {
+      pix = await getImagePixels(uploadedImage.previewUrl, CAPTURE_DIM);
+    } else if (captureRef.current?.isCapturing) {
+      const frame = captureRef.current.captureFrame(CAPTURE_DIM);
+      if (frame) pix = { rgbPixels: frame.rgbPixels, width: frame.width, height: frame.height };
     }
 
-    const frame = cam.captureFrame(CAPTURE_DIM);
-    if (!frame) return;
+    if (!pix) {
+      setError('Provide an image first.');
+      return;
+    }
+
+    if (loader.state !== 'ready') {
+      setError('Model not initialized.');
+      return;
+    }
 
     setProcessing(true);
+    setProcStep('encoding');
     processingRef.current = true;
     setError(null);
-
     const t0 = performance.now();
 
     try {
-      const bridge = VLMWorkerBridge.shared;
-      if (!bridge.isModelLoaded) {
-        throw new Error('VLM model not loaded in worker');
-      }
-
-      const res = await bridge.process(
-        frame.rgbPixels,
-        frame.width,
-        frame.height,
-        prompt,
-        { maxTokens, temperature: 0.6 },
-      );
-
+      // SHORTER PROMPT: Reduces the likelihood of the -234 context limit error
+      const prompt = `Assistant: Analyse image. Re-design as "${selectedStyle}". Highlight 3 changes.`;
+      
+      const res = await VLMWorkerBridge.shared.process(pix.rgbPixels, pix.width, pix.height, prompt, { maxTokens, temperature: 0.1 });
       setResult({ text: res.text, totalMs: performance.now() - t0 });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const isWasmCrash = msg.includes('memory access out of bounds')
-        || msg.includes('RuntimeError');
-
-      if (isWasmCrash) {
-        setResult({ text: 'Recovering from memory error... next frame will retry.', totalMs: 0 });
-      } else {
-        setError(msg);
-        if (liveModeRef.current) stopLive();
-      }
+      setError('Context Limit Error (-234): This usually happens if the engine RAM is low. Try a simpler image or refresh. ' + String(err));
     } finally {
       setProcessing(false);
+      setProcStep(null);
       processingRef.current = false;
     }
-  }, [loader, prompt]);
+  }, [loader, selectedStyle, vibePrompt, uploadedImage]);
 
-  // ------------------------------------------------------------------
-  // Single-shot
-  // ------------------------------------------------------------------
-  const describeSingle = useCallback(async () => {
-    if (!captureRef.current?.isCapturing) {
-      await startCamera();
-      return;
-    }
-    await describeFrame(SINGLE_MAX_TOKENS);
-  }, [startCamera, describeFrame]);
-
-  // ------------------------------------------------------------------
-  // Live mode
-  // ------------------------------------------------------------------
-  const startLive = useCallback(async () => {
-    if (!captureRef.current?.isCapturing) {
-      await startCamera();
-    }
-
-    setLiveMode(true);
-    liveModeRef.current = true;
-
-    // Immediately describe first frame
-    describeFrame(LIVE_MAX_TOKENS);
-
-    // Then poll every 2.5s — skips ticks while inference is running
-    liveIntervalRef.current = setInterval(() => {
-      if (!processingRef.current && liveModeRef.current) {
-        describeFrame(LIVE_MAX_TOKENS);
-      }
-    }, LIVE_INTERVAL_MS);
-  }, [startCamera, describeFrame]);
-
-  const stopLive = useCallback(() => {
-    setLiveMode(false);
-    liveModeRef.current = false;
-    if (liveIntervalRef.current) {
-      clearInterval(liveIntervalRef.current);
-      liveIntervalRef.current = null;
-    }
-  }, []);
-
-  const toggleLive = useCallback(() => {
-    if (liveMode) {
-      stopLive();
-    } else {
-      startLive();
-    }
-  }, [liveMode, startLive, stopLive]);
-
-  // ------------------------------------------------------------------
-  // Render
-  // ------------------------------------------------------------------
   return (
-    <div className="tab-panel vision-panel">
-      <ModelBanner
-        state={loader.state}
-        progress={loader.progress}
-        error={loader.error}
-        onLoad={loader.ensure}
-        label="VLM"
-      />
-
-      <div className="vision-camera">
-        {!cameraActive && (
-          <div className="empty-state">
-            <h3>📷 Camera Preview</h3>
-            <p>Tap below to start the camera</p>
-          </div>
-        )}
-        <div ref={videoMountRef} />
-      </div>
-
-      <input
-        className="vision-prompt"
-        type="text"
-        placeholder="What do you want to know about the image?"
-        value={prompt}
-        onChange={(e) => setPrompt(e.target.value)}
-        disabled={liveMode}
-      />
-
-      <div className="vision-actions">
-        {!cameraActive ? (
-          <button className="btn btn-primary" onClick={startCamera}>Start Camera</button>
-        ) : (
-          <>
-            <button
-              className="btn btn-primary"
-              onClick={describeSingle}
-              disabled={processing || liveMode}
-            >
-              {processing && !liveMode ? 'Analyzing...' : 'Describe'}
-            </button>
-            <button
-              className={`btn ${liveMode ? 'btn-live-active' : ''}`}
-              onClick={toggleLive}
-              disabled={processing && !liveMode}
-            >
-              {liveMode ? '⏹ Stop Live' : '▶ Live'}
-            </button>
-          </>
-        )}
-      </div>
-
-      {error && (
-        <div className="vision-result">
-          <span className="error-text">Error: {error}</span>
+    <div className="tab-panel">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '30px' }}>
+        <div>
+          <h2 className="section-title serif" style={{ fontSize: '36px' }}>Designer Studio</h2>
+          <p className="section-desc">Local visionary intelligence. 100% On-Device.</p>
         </div>
-      )}
+        <ModelBanner state={loader.state} progress={loader.progress} error={loader.error} onLoad={loader.ensure} label="Aethra VLM" />
+      </div>
 
-      {result && (
-        <div className="vision-result">
-          {liveMode && <span className="live-badge">LIVE</span>}
-          <h4>Result</h4>
-          <p>{result.text}</p>
-          {result.totalMs > 0 && (
-            <div className="message-stats">{(result.totalMs / 1000).toFixed(1)}s</div>
+      <div className="designer-grid">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          <div className="vision-card">
+            <h4 style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '16px', textTransform: 'uppercase' }}>1. Space Vision</h4>
+            {cameraActive ? (
+              <div className="vision-camera active" ref={videoMountRef}>
+                 <button className="btn btn-sm" style={{ position: 'absolute', top: '10px', right: '10px', zIndex: 10 }} onClick={stopCamera}>Close</button>
+              </div>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: uploadedImage ? '1fr' : '1fr 1fr', gap: '10px' }}>
+                 {!uploadedImage && <button className="vision-camera" onClick={startCamera}>📷 Live Camera</button>}
+                 <ImageUpload image={uploadedImage} setImage={setUploadedImage} />
+              </div>
+            )}
+          </div>
+
+          <div className="vision-card">
+            <h4 style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '16px', textTransform: 'uppercase' }}>2. Design Aura</h4>
+            <div className="aesthetic-grid">
+              {AESTHETIC_STYLES.map(style => (
+                <div key={style} className={`aesthetic-item ${selectedStyle === style ? 'active' : ''}`} onClick={() => setSelectedStyle(style)}>
+                  {style}
+                </div>
+              ))}
+            </div>
+            <button className="btn btn-primary" style={{ width: '100%', marginTop: '24px' }} onClick={() => analyzeDesign(SINGLE_MAX_TOKENS)} disabled={processing || (!uploadedImage && !cameraActive)}>
+               {processing ? 'Thinking...' : 'Unveil Insight'}
+            </button>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          {error && <div className="vision-card" style={{ background: 'rgba(156,106,106,0.1)', color: 'var(--error)', fontSize: '12px' }}>{error}</div>}
+          {processing && (
+            <div className="vision-card" style={{ height: '520px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+               <div style={{ textAlign: 'center' }}>
+                  <div className="spinner" style={{ margin: '0 auto 20px' }} />
+                  <h3 className="serif" style={{ fontSize: '24px' }}>Aethra Imagining...</h3>
+                  <p style={{ opacity: 0.6 }}>Local Vision Encoding (Step: {procStep})</p>
+               </div>
+            </div>
+          )}
+          {result && !processing && (
+            <div className="vision-card" style={{ animation: 'fadeIn 0.6s' }}>
+              <h3 className="serif" style={{ fontSize: '32px', marginBottom: '16px', color: 'var(--primary)' }}>Visionary Insight</h3>
+              <p style={{ color: '#F1E4D8', lineHeight: 1.8, fontSize: '16px', background: 'rgba(0,0,0,0.1)', padding: '20px', borderRadius: '10px' }}>{result.text}</p>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '20px', alignItems: 'center' }}>
+                  <div className="badge">{selectedStyle} Applied</div>
+                  <div className="badge" style={{ opacity: 0.8 }}>{getAccelerationMode()?.toUpperCase()} ENGINE</div>
+                  <div style={{ fontSize: '10px', opacity: 0.5 }}>{(result.totalMs / 1000).toFixed(1)}s On-Device</div>
+              </div>
+            </div>
           )}
         </div>
-      )}
+      </div>
     </div>
   );
 }

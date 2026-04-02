@@ -1,6 +1,13 @@
 /**
- * RunAnywhere SDK initialization for Aethra (Designer LLM + VLM).
- * Zero server dependency, all local.
+ * RunAnywhere SDK initialization and model catalog.
+ *
+ * This module:
+ * 1. Initializes the core SDK (TypeScript-only, no WASM)
+ * 2. Registers the LlamaCPP backend (loads LLM/VLM WASM)
+ * 3. Registers the ONNX backend (sherpa-onnx — STT/TTS/VAD)
+ * 4. Registers the model catalog and wires up VLM worker
+ *
+ * Import this module once at app startup.
  */
 
 import {
@@ -9,39 +16,30 @@ import {
   ModelManager,
   ModelCategory,
   LLMFramework,
-  type CompactModelDef,
 } from '@runanywhere/web';
 
 import { LlamaCPP, VLMWorkerBridge } from '@runanywhere/web-llamacpp';
+import { ONNX } from '@runanywhere/web-onnx';
 
+// Vite bundles the worker as a standalone JS chunk and returns its URL.
 // @ts-ignore — Vite-specific ?worker&url query
 import vlmWorkerUrl from './workers/vlm-worker?worker&url';
 
 // ---------------------------------------------------------------------------
-// Aethra Model Catalog
+// Model catalog
 // ---------------------------------------------------------------------------
 
-const MODELS: CompactModelDef[] = [
-  // Aethra Designer LLM (Liquid AI LFM2 350M) — fast & sharp
-  {
-    id: 'lfm2-350m-q4_k_m',
-    name: 'Aethra Designer LFM2',
-    repo: 'LiquidAI/LFM2-350M-GGUF',
-    files: ['LFM2-350M-Q4_K_M.gguf'],
-    framework: LLMFramework.LlamaCpp,
-    modality: ModelCategory.Language,
-    memoryRequirement: 250_000_000,
-  },
-  // Aethra Vision Advisor (Liquid AI LFM2-VL 450M)
+const MODELS = [
+  // VLM — Liquid AI LFM2-VL 450M (vision + language)
   {
     id: 'lfm2-vl-450m-q4_0',
-    name: 'Aethra Vision Advisor',
+    name: 'LFM2-VL 450M Q4_0',
     repo: 'runanywhere/LFM2-VL-450M-GGUF',
     files: ['LFM2-VL-450M-Q4_0.gguf', 'mmproj-LFM2-VL-450M-Q8_0.gguf'],
     framework: LLMFramework.LlamaCpp,
     modality: ModelCategory.Multimodal,
-    memoryRequirement: 600_000_000,
-  },
+    memoryRequirement: 500_000_000,
+  }
 ];
 
 // ---------------------------------------------------------------------------
@@ -50,23 +48,25 @@ const MODELS: CompactModelDef[] = [
 
 let _initPromise: Promise<void> | null = null;
 
-export async function initSDK(): Promise<void> {
+/** Initialize the RunAnywhere SDK. Safe to call multiple times. */
+export async function initSDK() {
   if (_initPromise) return _initPromise;
 
   _initPromise = (async () => {
-    // Core SDK
+    // Step 1: Initialize core SDK (TypeScript-only, no WASM)
     await RunAnywhere.initialize({
       environment: SDKEnvironment.Development,
-      debug: true,
+      debug: false,
     });
 
-    // Register LlamaCPP backend (required for LLM/VLM)
+    // Step 2: Register backends (loads WASM automatically)
     await LlamaCPP.register();
+    await ONNX.register();
 
-    // Register model catalog
+    // Step 3: Register model catalog
     RunAnywhere.registerModels(MODELS);
 
-    // Wire up VLM worker
+    // Step 4: Wire up VLM worker
     VLMWorkerBridge.shared.workerUrl = vlmWorkerUrl;
     RunAnywhere.setVLMLoader({
       get isInitialized() { return VLMWorkerBridge.shared.isInitialized; },
@@ -77,10 +77,6 @@ export async function initSDK(): Promise<void> {
   })();
 
   return _initPromise;
-}
-
-export function getAccelerationMode(): string | null {
-  return LlamaCPP.isRegistered ? LlamaCPP.accelerationMode : null;
 }
 
 export { RunAnywhere, ModelManager, ModelCategory, VLMWorkerBridge };
